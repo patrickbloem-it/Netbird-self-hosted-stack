@@ -1,0 +1,20 @@
+# Custom Parser for Netbird Management Logs
+# Detecting Peer Login Failures
+filter: "evt.Parsed.program == 'netbird-management'"
+onsuccess: next_stage
+name: patrickbloem/netbird-auth-parser
+description: "Parse Netbird management peer login failures"
+nodes:
+  - grok:
+      pattern: '%{TIMESTAMP_ISO8601:timestamp}.*failed logging in peer %{DATA:peer_id}.*: %{GREEDYDATA:failure_reason}'
+      apply_on: message
+      statics:
+        - meta: log_type
+          value: netbird_auth_failure
+        - meta: service
+          value: netbird
+        - target: evt.StrTime
+          expression: evt.Parsed.timestamp
+statics:
+    - meta: source_ip
+      expression: "evt.Parsed.remote_ip" # Assuming IP is captured in log context
