@@ -1,0 +1,30 @@
+# Netbird Stack Log Acquisition
+# Maps Docker logs to specific CrowdSec labels
+
+---
+# Caddy Access Logs
+filenames:
+  - /var/log/caddy/*.log
+labels:
+  type: caddy
+
+---
+# Netbird Management Logs (Go)
+filenames:
+  - /var/log/netbird/*.log
+labels:
+  type: netbird-management
+
+---
+# Coturn STUN/TURN Logs
+filenames:
+  - /var/log/coturn/*.log
+labels:
+  type: coturn
+
+---
+# Zitadel Auth Logs
+filenames:
+  - /var/log/zitadel/*.log
+labels:
+  type: zitadel
