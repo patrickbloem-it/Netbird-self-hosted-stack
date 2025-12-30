@@ -1,0 +1,151 @@
+services:
+
+  # ============================================
+  # REVERSE PROXY
+  # ============================================
+  caddy:
+    image: caddy:latest
+    container_name: netbird-caddy
+    restart: unless-stopped
+    networks: [netbird]
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp' # HTTP/3 Support
+    volumes:
+      - ./data/caddy:/data
+      - ./config/Caddyfile:/etc/caddy/Caddyfile
+      - ./logs/caddy:/var/log/caddy
+    logging:
+      driver: "json-file"
+      options: {max-size: "100m", max-file: "2"}
+
+  # ============================================
+  # NETBIRD CORE SERVICES
+  # ============================================
+  management:
+    image: netbirdio/management:latest
+    container_name: netbird-management
+    restart: unless-stopped
+    networks: [netbird]
+    volumes:
+      - ./data/management:/var/lib/netbird
+      - ./config/management.json:/etc/netbird/management.json
+      - ./logs/management:/var/log/netbird
+    command: [
+      "--port", "80",
+      "--log-file", "console",
+      "--log-level", "info",
+      "--disable-anonymous-metrics=false",
+      "--dns-domain=${DOMAIN}"
+    ]
+    logging:
+      driver: "json-file"
+      options: {max-size: "100m", max-file: "2"}
+
+  signal:
+    image: netbirdio/signal:latest
+    container_name: netbird-signal
+    restart: unless-stopped
+    networks: [netbird]
+    logging:
+      driver: "json-file"
+      options: {max-size: "100m", max-file: "2"}
+
+  dashboard:
+    image: netbirdio/dashboard:latest
+    container_name: netbird-dashboard
+    restart: unless-stopped
+    networks: [netbird]
+    env_file: .env
+    logging:
+      driver: "json-file"
+      options: {max-size: "50m", max-file: "2"}
+
+  # ============================================
+  # COTURN (STUN/TURN) - Hardened Configuration
+  # ============================================
+  coturn:
+    image: coturn/coturn:latest
+    container_name: netbird-coturn
+    restart: unless-stopped
+    networks: [netbird]
+    # Explicit port binding for network segregation (no host mode)
+    ports:
+      - '${PUBLIC_IP}:3478:3478/udp'
+      - '${PUBLIC_IP}:3478:3478/tcp'
+      - '${PUBLIC_IP}:5349:5349/tcp'
+      - '${PUBLIC_IP}:49152-65535:49152-65535/udp'
+    volumes:
+      - ./config/turnserver.conf:/etc/turnserver.conf:ro
+      - ./logs/coturn:/var/log/coturn
+    command: ["-c", "/etc/turnserver.conf"]
+    logging:
+      driver: "json-file"
+      options: {max-size: "100m", max-file: "2"}
+
+  # ============================================
+  # IDENTITY PROVIDER
+  # ============================================
+  zitadel:
+    image: 'ghcr.io/zitadel/zitadel:v2.64' # Pinned minor version for stability
+    container_name: netbird-zitadel
+    restart: always
+    networks: [netbird]
+    command: 'start-from-init --masterkeyFromEnv --tlsMode external'
+    env_file: .env
+    depends_on:
+      zdb: {condition: service_healthy}
+    volumes:
+      - ./data/zitadel/machinekey:/machinekey
+      - ./logs/zitadel:/var/log/zitadel
+    logging:
+      driver: "json-file"
+      options: {max-size: "100m", max-file: "2"}
+
+  zdb:
+    image: 'postgres:16-alpine'
+    container_name: netbird-postgres
+    restart: always
+    networks: [netbird]
+    env_file: .env
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data:rw
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready", "-d", "db_prod"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options: {max-size: "50m", max-file: "2"}
+
+  # ============================================
+  # SECURITY & MONITORING
+  # ============================================
+  crowdsec:
+    image: crowdsecurity/crowdsec:latest
+    container_name: netbird-crowdsec
+    restart: unless-stopped
+    networks: [netbird]
+    environment:
+      - COLLECTIONS=crowdsecurity/linux crowdsecurity/caddy crowdsecurity/postgresql
+      - ENROLL_TAGS=netbird,infrastructure
+    volumes:
+      - ./config/crowdsec:/etc/crowdsec
+      - ./data/crowdsec:/var/lib/crowdsec/data
+      # Read-only access to logs
+      - ./logs/caddy:/var/log/caddy:ro
+      - ./logs/management:/var/log/netbird:ro
+      - ./logs/coturn:/var/log/coturn:ro
+      - /var/log/auth.log:/var/log/auth.log:ro
+    logging:
+      driver: "json-file"
+      options: {max-size: "50m", max-file: "2"}
+
+networks:
+  netbird:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
