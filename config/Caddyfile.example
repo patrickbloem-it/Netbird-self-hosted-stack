@@ -1,0 +1,13 @@
+# Caddyfile Reference Configuration
+
+{$DOMAIN} {
+    log {
+        output file /var/log/caddy/access.log
+        format json
+    }
+
+    reverse_proxy /api/* netbird-management:80
+    reverse_proxy /management.ManagementService/* h2c://netbird-management:80
+    reverse_proxy /signalexchange.SignalExchange/* h2c://netbird-signal:80
+    reverse_proxy /* netbird-dashboard:80
+}
