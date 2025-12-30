@@ -13,8 +13,9 @@ services:
       - '443:443'
       - '443:443/udp' # HTTP/3 Support
     volumes:
-      - ./data/caddy:/data
+      - netbird_caddy_data:/data
       - ./config/Caddyfile:/etc/caddy/Caddyfile
+      # Log volume for CrowdSec
       - ./logs/caddy:/var/log/caddy
     logging:
       driver: "json-file"
@@ -23,25 +24,15 @@ services:
   # ============================================
   # NETBIRD CORE SERVICES
   # ============================================
-  management:
-    image: netbirdio/management:latest
-    container_name: netbird-management
+  dashboard:
+    image: netbirdio/dashboard:latest
+    container_name: netbird-dashboard
     restart: unless-stopped
     networks: [netbird]
-    volumes:
-      - ./data/management:/var/lib/netbird
-      - ./config/management.json:/etc/netbird/management.json
-      - ./logs/management:/var/log/netbird
-    command: [
-      "--port", "80",
-      "--log-file", "console",
-      "--log-level", "info",
-      "--disable-anonymous-metrics=false",
-      "--dns-domain=${DOMAIN}"
-    ]
+    env_file: .env # Maps to dashboard.env in your setup
     logging:
       driver: "json-file"
-      options: {max-size: "100m", max-file: "2"}
+      options: {max-size: "50m", max-file: "2"}
 
   signal:
     image: netbirdio/signal:latest
@@ -52,15 +43,38 @@ services:
       driver: "json-file"
       options: {max-size: "100m", max-file: "2"}
 
-  dashboard:
-    image: netbirdio/dashboard:latest
-    container_name: netbird-dashboard
+  relay:
+    image: netbirdio/relay:latest
+    container_name: netbird-relay
     restart: unless-stopped
     networks: [netbird]
-    env_file: .env
+    env_file: .env # Maps to relay.env
     logging:
       driver: "json-file"
-      options: {max-size: "50m", max-file: "2"}
+      options: {max-size: "100m", max-file: "2"}
+
+  management:
+    image: netbirdio/management:latest
+    container_name: netbird-management
+    restart: unless-stopped
+    networks: [netbird]
+    volumes:
+      - netbird_management:/var/lib/netbird
+      - ./config/management.json:/etc/netbird/management.json
+      # Log volume for CrowdSec parsing
+      - ./logs/management:/var/log/netbird
+    command: [
+      "--port", "80",
+      "--log-file", "console",
+      "--log-level", "info",
+      "--disable-anonymous-metrics=false",
+      "--single-account-mode-domain=${DOMAIN}",
+      "--dns-domain=${DOMAIN}",
+      "--idp-sign-key-refresh-enabled"
+    ]
+    logging:
+      driver: "json-file"
+      options: {max-size: "100m", max-file: "2"}
 
   # ============================================
   # COTURN (STUN/TURN) - Hardened Configuration
@@ -70,7 +84,7 @@ services:
     container_name: netbird-coturn
     restart: unless-stopped
     networks: [netbird]
-    # Explicit port binding for network segregation (no host mode)
+    # SECURITY FIX: Replaces 'network_mode: host' with specific bindings
     ports:
       - '${PUBLIC_IP}:3478:3478/udp'
       - '${PUBLIC_IP}:3478:3478/tcp'
@@ -78,6 +92,7 @@ services:
       - '${PUBLIC_IP}:49152-65535:49152-65535/udp'
     volumes:
       - ./config/turnserver.conf:/etc/turnserver.conf:ro
+      # Log volume for CrowdSec
       - ./logs/coturn:/var/log/coturn
     command: ["-c", "/etc/turnserver.conf"]
     logging:
@@ -85,19 +100,20 @@ services:
       options: {max-size: "100m", max-file: "2"}
 
   # ============================================
-  # IDENTITY PROVIDER
+  # IDENTITY PROVIDER (ZITADEL)
   # ============================================
   zitadel:
-    image: 'ghcr.io/zitadel/zitadel:v2.64' # Pinned minor version for stability
+    image: 'ghcr.io/zitadel/zitadel:v2.64' # Pinned minor version
     container_name: netbird-zitadel
     restart: always
     networks: [netbird]
     command: 'start-from-init --masterkeyFromEnv --tlsMode external'
-    env_file: .env
+    env_file: .env # Maps to zitadel.env
     depends_on:
       zdb: {condition: service_healthy}
     volumes:
       - ./data/zitadel/machinekey:/machinekey
+      - netbird_zitadel_certs:/zdb-certs:ro
       - ./logs/zitadel:/var/log/zitadel
     logging:
       driver: "json-file"
@@ -108,9 +124,9 @@ services:
     container_name: netbird-postgres
     restart: always
     networks: [netbird]
-    env_file: .env
+    env_file: .env # Maps to zdb.env
     volumes:
-      - ./data/postgres:/var/lib/postgresql/data:rw
+      - netbird_zdb_data:/var/lib/postgresql/data:rw
     healthcheck:
       test: ["CMD-SHELL", "pg_isready", "-d", "db_prod"]
       interval: 10s
@@ -121,7 +137,7 @@ services:
       options: {max-size: "50m", max-file: "2"}
 
   # ============================================
-  # SECURITY & MONITORING
+  # SECURITY & MONITORING (CrowdSec)
   # ============================================
   crowdsec:
     image: crowdsecurity/crowdsec:latest
@@ -132,16 +148,49 @@ services:
       - COLLECTIONS=crowdsecurity/linux crowdsecurity/caddy crowdsecurity/postgresql
       - ENROLL_TAGS=netbird,infrastructure
     volumes:
-      - ./config/crowdsec:/etc/crowdsec
       - ./data/crowdsec:/var/lib/crowdsec/data
-      # Read-only access to logs
+      - ./config/crowdsec:/etc/crowdsec
+      # Custom Configs
+      - ./config/crowdsec/acquis.yaml:/etc/crowdsec/acquis.yaml:ro
+      - ./config/crowdsec/parsers:/etc/crowdsec/parsers/s01-parse:ro
+      - ./config/crowdsec/scenarios:/etc/crowdsec/scenarios:ro
+      # Logs (Read-Only)
       - ./logs/caddy:/var/log/caddy:ro
       - ./logs/management:/var/log/netbird:ro
       - ./logs/coturn:/var/log/coturn:ro
+      - ./logs/zitadel:/var/log/zitadel:ro
       - /var/log/auth.log:/var/log/auth.log:ro
+    ports:
+      - "127.0.0.1:8080:8080" # LAPI for Bouncer
     logging:
       driver: "json-file"
       options: {max-size: "50m", max-file: "2"}
+
+  cs-firewall-bouncer:
+    image: crowdsecurity/cs-firewall-bouncer:latest
+    container_name: netbird-bouncer
+    restart: unless-stopped
+    network_mode: host # Required for iptables access
+    environment:
+      - CROWDSEC_LAPI_URL=http://127.0.0.1:8080
+      - CROWDSEC_LAPI_KEY=${CROWDSEC_BOUNCER_KEY}
+      - IPTABLES_CHAINS=INPUT,DOCKER-USER
+    depends_on:
+      - crowdsec
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    logging:
+      driver: "json-file"
+      options: {max-size: "50m", max-file: "2"}
+
+volumes:
+  netbird_management:
+  netbird_caddy_data:
+  netbird_zdb_data:
+  netbird_zitadel_certs:
 
 networks:
   netbird:
